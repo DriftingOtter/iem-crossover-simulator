@@ -1,7 +1,7 @@
 {
   "name": "iem-crossover-simulator",
   "version": "1.0.0",
-  "homepage": "https://github.com/DriftingOtter/iem-crossover-simulator.git",
+  "homepage": "https://driftingotter.github.io/iem-crossover-simulator",
   "dependencies": {
     "lucide-react": "^0.263.1",
     "react": "^18.2.0",
@@ -12,7 +12,7 @@
     "build:tailwind": "tailwindcss -i ./src/tailwind.css -o ./src/index.css --minify",
     "build:tailwind:watch": "tailwindcss -i ./src/tailwind.css -o ./src/index.css --watch",
     "start": "react-scripts start",
-    "build": "react-scripts build",
+    "build": "npm run build:tailwind && react-scripts build",
     "predeploy": "npm run build",
     "deploy": "gh-pages -d build"
   },

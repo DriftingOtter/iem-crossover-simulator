@@ -71,14 +71,36 @@ This creates an optimized production build in the `build/` folder.
 
 ### Deploying to GitHub Pages
 
-The repository is configured to deploy to GitHub Pages:
+There are two ways to deploy to GitHub Pages:
 
-```bash
-npm run deploy
-```
+#### Method 1: Using GitHub Actions (Recommended)
 
-This will build the app and deploy it to the `gh-pages` branch, making it available at:
-`https://driftingotter.github.io/iem-crossover-simulator/`
+1. Go to your repository on GitHub
+2. Click **Settings** → **Pages**
+3. Under **Source**, select **GitHub Actions**
+4. Push your code to the `main` branch - the workflow will automatically build and deploy
+
+The GitHub Actions workflow will:
+- Install dependencies
+- Build Tailwind CSS
+- Build the React app
+- Deploy to GitHub Pages
+
+Your app will be available at: `https://driftingotter.github.io/iem-crossover-simulator/`
+
+#### Method 2: Using gh-pages Package (Manual)
+
+1. Run the deploy command:
+   ```bash
+   npm run deploy
+   ```
+
+2. Go to your repository on GitHub → **Settings** → **Pages**
+3. Under **Source**, select **Deploy from a branch**
+4. Select the `gh-pages` branch and `/ (root)` folder
+5. Click **Save**
+
+This will build the app and deploy it to the `gh-pages` branch.
 
 ## 🛠️ Technology Stack
 
