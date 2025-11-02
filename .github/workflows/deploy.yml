@@ -33,11 +33,13 @@ jobs:
 
       - name: Build Tailwind CSS
         run: npm run build:tailwind
+        continue-on-error: false
 
       - name: Build React app
         run: npm run build
         env:
           PUBLIC_URL: /iem-crossover-simulator
+          GENERATE_SOURCEMAP: false
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
