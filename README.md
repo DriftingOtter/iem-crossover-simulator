@@ -1,137 +1,137 @@
 # 🎧 IEM Crossover Simulator
 
-This is a web-based tool for designing and simulating RLC crossover networks for In-Ear Monitors (IEMs). It allows you to upload driver data, build a crossover, and see how it affects the final sound, including a simulation of the human ear's acoustics.
+A web-based tool for designing and simulating RLC crossover networks for In-Ear Monitors (IEMs). Upload driver data, build crossovers, and visualize how they affect the final sound with accurate ear canal simulation.
 
-## ✨ Key Features
+---
 
-* **Multi-Driver Support:** Add multiple drivers, each with its own frequency response (`.frd`) and impedance (`.zma`) files.
-* **RLC Crossover Builder:** Design circuits using capacitors, inductors, and resistors in both series and parallel.
-* **IEC 711 Ear Simulator:** Models the acoustic load of the human ear, including canal resonance and eardrum properties.
-* **Source Voltage Presets:** See how different amplifier outputs (e.g., "Apple Dongle," "Desktop DAC") can change the final SPL.
-* **Interactive Analysis:**
-    * View the final summed **Magnitude Response (SPL)**.
-    * See the response of **Individual Drivers** after the crossover.
-    * Check the final **Impedance Curve** of the whole system.
-    * Analyze the **Phase Response** for driver alignment.
-* **Polarity Control:** Instantly flip a driver's polarity by 180 degrees.
-* **CSV Export:** Download your simulation results for further analysis.
-* **Advanced Interpolation:** Properly interpolates between frequency data points and applies realistic rolloff beyond measured ranges.
+## Features
 
-## 🧮 How It Works (A Brief Overview)
+| Category | Features |
+|----------|----------|
+| **Driver Management** | Multi-driver support • Polarity control • Individual driver analysis • Upload FRD and ZMA files |
+| **Crossover Design** | Capacitors, inductors, resistors • Series and parallel configurations • Real-time calculations |
+| **Acoustic Simulation** | IEC 711 ear simulator • Source voltage presets • Accurate impedance loading |
+| **Analysis Tools** | Magnitude response (SPL) • Phase response • Impedance curves • CSV export |
+| **Processing** | Smart interpolation between data points • Realistic rolloff beyond measured ranges |
 
-The simulation is calculated using fundamental electrical and acoustic principles:
+---
 
-1.  **Driver Impedance (ZMA):** Your `.zma` file provides the driver's complex impedance (resistance and phase) at different frequencies. The tool interpolates between data points for smooth curves.
-2.  **Ear Simulator:** An acoustic impedance model of the IEC 711 standard (a transmission line model of the ear canal) is calculated and added to the driver's impedance.
-3.  **Crossover Elements:** The impedance of each capacitor ($Z_C = 1 / (j\\omega C)$), inductor ($Z_L = j\\omega L$), and resistor ($Z_R = R$) is calculated at each frequency ($\\omega = 2\\pi f$).
-4.  **Total Impedance:** The tool calculates the total complex impedance of the driver, ear simulator, and all crossover elements (using rules for series and parallel circuits).
-5.  **Voltage Divider:** The crossover and driver/ear load form a complex voltage divider. The tool calculates the transfer function (how much voltage reaches the driver).
-6.  **Final SPL:** The attenuation (or gain) from the transfer function is applied to the driver's original `.frd` data (its "raw" SPL) to get the final SPL. Linear interpolation is used between measured points, with realistic rolloff applied beyond the measured frequency range.
-7.  **Summing:** For the "Total Response," the SPL values from all drivers are converted from decibels to linear pressure values (respecting polarity/phase), summed together, and then converted back to decibels.
+## How It Works
 
-## 🚀 Getting Started
+The simulator uses electrical and acoustic principles to model your IEM system:
 
-To get a local copy up and running, follow these simple steps.
+1. **Driver Impedance** - Reads complex impedance (magnitude and phase) from your `.zma` file and interpolates between data points.
+
+2. **Ear Canal Simulation** - Adds IEC 711 standard acoustic impedance to model the ear canal's transmission line effect.
+
+3. **Component Impedance** - Calculates impedance for each component at every frequency:
+   - Capacitor: Z_C = 1 / (j × 2πf × C)
+   - Inductor: Z_L = j × 2πf × L
+   - Resistor: Z_R = R
+
+4. **Total Impedance** - Combines all impedances using circuit rules (series: Z_total = Z₁ + Z₂ + ..., parallel: 1/Z_total = 1/Z₁ + 1/Z₂ + ...).
+
+5. **Transfer Function** - Calculates the voltage divider formed by the crossover and driver/ear load.
+
+6. **Final SPL** - Applies the transfer function's attenuation to the driver's raw frequency response from the `.frd` file.
+
+7. **Summation** - Converts all drivers' SPL to linear pressure (respecting polarity), sums them, and converts back to dB.
+
+---
+
+## Getting Started
 
 ### Prerequisites
 
-You must have [Node.js](https://nodejs.org/) (which includes npm) installed on your system.
+- [Node.js](https://nodejs.org/) (version 14 or higher)
 
-### Installation & Running
+### Installation
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/DriftingOtter/iem-crossover-simulator.git
-    cd iem-crossover-simulator
-    ```
+```bash
+# Clone the repository
+git clone https://github.com/DriftingOtter/iem-crossover-simulator.git
+cd iem-crossover-simulator
 
-2.  **Install NPM packages:**
-    ```bash
-    npm install
-    ```
-    This will install React, Tailwind CSS, Recharts, and all other dependencies.
+# Install dependencies
+npm install
 
-3.  **Run the development server:**
-    ```bash
-    npm start
-    ```
-    The application will open in your browser at `http://localhost:3000`.
+# Start development server
+npm start
+```
 
-    The development server uses Tailwind CSS via PostCSS (configured automatically with Create React App).
+Opens at `http://localhost:3000`
 
-### Building for Production
-
-To build the app for production:
+### Build for Production
 
 ```bash
 npm run build
 ```
 
-This creates an optimized production build in the `build/` folder.
+---
 
-### Deploying to GitHub Pages
+## File Formats
 
-There are two ways to deploy to GitHub Pages:
+### FRD Files (Frequency Response)
 
-#### Method 1: Using GitHub Actions (Recommended)
+Space or tab-separated: `Frequency(Hz) SPL(dB)`
 
-1. Go to your repository on GitHub
-2. Click **Settings** → **Pages**
-3. Under **Source**, select **GitHub Actions**
-4. Push your code to the `main` branch - the workflow will automatically build and deploy
-
-The GitHub Actions workflow will:
-- Install dependencies
-- Build Tailwind CSS
-- Build the React app
-- Deploy to GitHub Pages
-
-Your app will be available at: `https://driftingotter.github.io/iem-crossover-simulator/`
-
-#### Method 2: Using gh-pages Package (Manual)
-
-1. Run the deploy command:
-   ```bash
-   npm run deploy
-   ```
-
-2. Go to your repository on GitHub → **Settings** → **Pages**
-3. Under **Source**, select **Deploy from a branch**
-4. Select the `gh-pages` branch and `/ (root)` folder
-5. Click **Save**
-
-This will build the app and deploy it to the `gh-pages` branch.
-
-## 🛠️ Technology Stack
-
-* **React 18** - UI framework
-* **Tailwind CSS v3** - Styling (via PostCSS)
-* **Recharts** - Data visualization
-* **Lucide React** - Icons
-* **Create React App** - Build tooling
-
-## 📝 File Format Support
-
-### FRD Files (Frequency Response Data)
-Format: `Frequency(Hz) SPL(dB)` or space/tab separated
 ```
 20    45.2
 25    48.1
-...
+31.5  51.3
 ```
 
-### ZMA Files (Impedance Data)
-Format: `Frequency(Hz) Impedance(Ohm) Phase(degrees)` or space/tab separated
+### ZMA Files (Impedance)
+
+Space or tab-separated: `Frequency(Hz) Impedance(Ohm) Phase(degrees)`
+
 ```
 20    8.5    -15.2
 25    8.3    -12.1
-...
+31.5  8.2    -9.8
 ```
 
-## ⚠️ Disclaimer
+**Note:** First row should be data (no headers). Phase in degrees, not radians.
 
-This tool was created with AI assistance. While the calculations are based on fundamental electrical and acoustic principles, **take results with a grain of salt** on accuracy, especially if you don't understand the math going on. Always double-check results with other tools or real-world measurements if possible.
+---
 
-## 📄 License
+## Deployment to GitHub Pages
 
-This project is open source and available for educational purposes.
+### Option 1: GitHub Actions (Automatic)
+
+1. Go to **Settings** → **Pages**
+2. Under **Source**, select **GitHub Actions**
+3. Push to `main` branch
+
+Live at: `https://driftingotter.github.io/iem-crossover-simulator/`
+
+### Option 2: Manual
+
+```bash
+npm run deploy
+```
+
+Then go to **Settings** → **Pages**, select **Deploy from a branch**, choose `gh-pages` branch and `/ (root)` folder.
+
+---
+
+## Technology Stack
+
+- **React 18** - UI framework
+- **Tailwind CSS v3** - Styling
+- **Recharts** - Charts and visualization
+- **Lucide React** - Icons
+- **Create React App** - Build tooling
+
+---
+
+## Disclaimer
+
+This tool was created with AI assistance. While calculations are based on established electrical and acoustic principles, **verify results with other tools or measurements when possible**. Simulation accuracy depends on input data quality. Use at your own risk and always test physical builds carefully.
+
+---
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+
