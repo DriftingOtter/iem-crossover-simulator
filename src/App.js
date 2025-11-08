@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Plus, Trash2, Play, Download, Info, ChevronUp, ChevronDown, Zap } from 'lucide-react';
 
+// A small constant to prevent division by zero and log(0)
+const EPSILON = 1e-12;
+
 // Source presets with typical output voltages
 const SOURCE_PRESETS = {
     raw: { name: 'Raw Audio (Phone)', voltage: 0.5 },
@@ -30,6 +33,10 @@ const IEMCrossoverSimulator = () => {
     });
 
     // Utility functions
+    /**
+     * Parses FRD (Freq, SPL, Phase) and ZMA (Freq, Impedance, Phase) data.
+     * Assumes 3 columns for FRD, 2 or 3 for ZMA.
+     */
     const parseFrequencyData = (text, type) => {
         const lines = text.trim().split('\n');
         const data = [];
@@ -40,21 +47,27 @@ const IEMCrossoverSimulator = () => {
             const parts = line.trim().split(/\s+/);
             if (parts.length >= 2) {
                 const freq = parseFloat(parts[0]);
-                const value = parseFloat(parts[1]);
+                const val1 = parseFloat(parts[1]);
+                let phase = 0; // Default phase
 
-                if (!isNaN(freq) && !isNaN(value)) {
+                if (parts.length >= 3) {
+                    phase = parseFloat(parts[2]) || 0;
+                }
+
+                if (!isNaN(freq) && !isNaN(val1)) {
                     if (type === 'frd') {
-                        data.push({ freq, spl: value });
+                        // FRD: Freq, SPL, Phase
+                        data.push({ freq, spl: val1, phase: phase });
                     } else if (type === 'zma') {
-                        const phase = parts.length >= 3 ? parseFloat(parts[2]) : 0;
-                        data.push({ freq, impedance: value, phase: isNaN(phase) ? 0 : phase });
+                        // ZMA: Freq, Impedance, Phase
+                        data.push({ freq, impedance: val1, phase: phase });
                     }
                 }
             }
         }
-
         return data;
     };
+
 
     const handleFileUpload = async (e, driverIndex, type) => {
         const file = e.target.files[0];
@@ -81,7 +94,8 @@ const IEMCrossoverSimulator = () => {
             name: `Driver ${drivers.length + 1}`,
             frd: null,
             zma: null,
-            polarity: false
+            polarity: false,
+            frdCompensated: true // NEW: Assume FRD is already compensated by default
         }]);
     };
 
@@ -98,10 +112,10 @@ const IEMCrossoverSimulator = () => {
         });
     };
 
-    const updateDriverName = (index, name) => {
+    const updateDriverField = (index, field, value) => {
         setDrivers(prev => {
             const updated = [...prev];
-            updated[index].name = name;
+            updated[index][field] = value;
             return updated;
         });
     };
@@ -119,7 +133,9 @@ const IEMCrossoverSimulator = () => {
             type: 'capacitor',
             value: 10,
             series: true,
-            order: maxOrder + 1
+            order: maxOrder + 1,
+            esr: 0.05, // NEW: Equivalent Series Resistance
+            dcr: 0.1   // NEW: DC Resistance
         }]);
     };
 
@@ -142,7 +158,7 @@ const IEMCrossoverSimulator = () => {
             .sort((a, b) => a.order - b.order);
 
         const currentIndex = driverElements.findIndex(el => el.id === id);
-        const newIndex = direction === 'up' ? currentIndex - 1 : newIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+        const newIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
 
         if (newIndex < 0 || newIndex >= driverElements.length) return;
 
@@ -168,7 +184,8 @@ const IEMCrossoverSimulator = () => {
 
     const complexDivide = (a, b) => {
         const denom = b.real * b.real + b.imag * b.imag;
-        if (denom === 0) return { real: 0, imag: 0 };
+        // IEEE Check: Avoid division by zero
+        if (Math.abs(denom) < EPSILON) return { real: 0, imag: 0 };
         return {
             real: (a.real * b.real + a.imag * b.imag) / denom,
             imag: (a.imag * b.real - a.real * b.imag) / denom
@@ -185,96 +202,60 @@ const IEMCrossoverSimulator = () => {
         );
     };
 
-    // --- NEW HELPER FUNCTION ---
     // Helper for a parallel RLC branch
     const parallelRLC = (R, L, C, omega) => {
-        // Avoid division by zero
-        if (R < 1e-9) R = 1e-9;
-        if (L < 1e-12) L = 1e-12;
-        if (C < 1e-15) C = 1e-15;
+        // IEEE Check: Use EPSILON as floor
+        if (R < EPSILON) R = EPSILON;
+        if (L < EPSILON) L = EPSILON;
+        if (C < EPSILON) C = EPSILON;
 
         const Z_R = { real: R, imag: 0 };
         const Z_L = { real: 0, imag: omega * L };
-        // Avoid division by zero at DC (freq=0)
-        const Z_C = { real: 0, imag: (omega > 1e-6) ? -1 / (omega * C) : -1e12 };
+        // IEEE Check: Avoid division by zero at DC
+        const Z_C = { real: 0, imag: (omega > EPSILON) ? -1 / (omega * C) : -1 / (EPSILON * C) };
 
-        // 1 / Z_total = 1/R + 1/Z_L + 1/Z_C
         const Y_R = { real: 1 / R, imag: 0 };
-        const Y_L = { real: 0, imag: -1 / (omega * L) };
+        const Y_L = { real: 0, imag: -1 / (omega * L + EPSILON) };
         const Y_C = { real: 0, imag: omega * C };
 
         const Y_total = complexAdd(Y_R, complexAdd(Y_L, Y_C));
 
-        // Z_total = 1 / Y_total
         return complexDivide({ real: 1, imag: 0 }, Y_total);
     };
 
-    // --- REPLACED FUNCTION 1: IEC 60318-4 (711) Ear Simulator ---
-
     // Pre-calculated acoustic impedance magnitude at 200 Hz for reference
-    // This is from the standard model below with default parameters.
     const Z_EAR_REF_MAG = 163.5;
 
-    /**
-     * Calculates the ACOUSTIC IMPEDANCE (Za) of the IEC 60318-4 ear simulator.
-     * This is based on the standard RLC equivalent circuit model.
-     * The sliders for compliance, length, and volume now *perturb* this standard model.
-     */
     const getEarSimulatorImpedance = (freq) => {
         if (!earSimulator.enabled) {
-            // Return a flat, purely resistive impedance if disabled
-            // This means earBoostDb will be 0
             return { real: Z_EAR_REF_MAG, imag: 0 };
         }
 
         const omega = 2 * Math.PI * freq;
 
         // --- Standard IEC 60318-4 Equivalent Circuit Parameters ---
-        // These values represent the acoustic impedance in Pa*s/m^3
-
-        // Main tube resonance (approximates the canal)
         const R0 = 155.8;
         const L0_base = 0.0076;
-
-        // First parallel resonance (Helmholtz resonance of coupler main volume)
         const R1 = 292;
         const L1 = 0.021;
         const C1_base = 200e-9;
-
-        // Second parallel resonance (Eardrum compliance and mass)
         const R2 = 1437;
         const L2 = 0.106;
         const C2_base = 30e-9;
 
         // --- Apply Simulator Settings ---
-        // We use the sliders to "perturb" the standard model
-
-        // Scale canal length (L0) and volume (C1)
-        // Assumes defaults are 1.2cm and 1.0cc
         const L0_scaled = L0_base * (earSimulator.canalLength / 1.2);
         const C1_scaled = C1_base * (earSimulator.canalVolume / 1.0);
-
-        // Scale drum compliance (C2)
         const C2_scaled = C2_base * earSimulator.drumCompliance;
 
         // --- Calculate Circuit Impedance ---
-
-        // 1. Main branch (series R-L)
         const Z_branch0 = { real: R0, imag: omega * L0_scaled };
-
-        // 2. First parallel branch (R-L-C)
         const Z_branch1 = parallelRLC(R1, L1, C1_scaled, omega);
-
-        // 3. Second parallel branch (R-L-C)
         const Z_branch2 = parallelRLC(R2, L2, C2_scaled, omega);
 
-        // Total acoustic impedance is the sum of the series branches
         let Zear = complexAdd(Z_branch0, complexAdd(Z_branch1, Z_branch2));
 
-        // 4. Apply leakage as a parallel resistor
         if (earSimulator.leakage > 0) {
-            // Create a high-value acoustic resistor for leakage
-            // The (1 + ... * 100) is a quick scaling factor
             const R_leak = 1e9 / (1 + earSimulator.leakage * 100);
             Zear = parallelImpedance(Zear, { real: R_leak, imag: 0 });
         }
@@ -286,7 +267,6 @@ const IEMCrossoverSimulator = () => {
     const interpolateFrequencyData = (data, targetFreq, getValue) => {
         if (!data || data.length === 0) return null;
 
-        // Find surrounding points
         let lowerIdx = -1;
         let upperIdx = -1;
 
@@ -300,81 +280,69 @@ const IEMCrossoverSimulator = () => {
             }
         }
 
-        // Extrapolation below range
-        if (lowerIdx === -1 && upperIdx !== -1) {
-            return getValue(data[upperIdx]);
-        }
+        if (lowerIdx === -1 && upperIdx !== -1) return getValue(data[upperIdx]);
+        if (lowerIdx !== -1 && upperIdx === -1) return getValue(data[lowerIdx]); // Just use last point, no rolloff
+        if (lowerIdx === upperIdx) return getValue(data[lowerIdx]);
 
-        // Extrapolation above range - use last value but apply rolloff
-        if (lowerIdx !== -1 && upperIdx === -1) {
-            const lastPoint = data[data.length - 1];
-            const lastFreq = data[data.length - 1].freq;
-            // Apply -6dB/octave rolloff above measured range
-            const octavesAbove = Math.log2(targetFreq / lastFreq);
-            const rolloffDb = -6 * octavesAbove;
-            const baseValue = getValue(lastPoint);
-            if (typeof baseValue === 'number' && (baseValue < 200 && baseValue > -200) /* Check if it's SPL */) {
-                return baseValue + rolloffDb;
-            }
-            // For impedance/phase, just return last value
-            return baseValue;
-        }
-
-        // Exact match
-        if (lowerIdx === upperIdx) {
-            return getValue(data[lowerIdx]);
-        }
-
-        // Linear interpolation
         const lower = data[lowerIdx];
         const upper = data[upperIdx];
 
-        // Avoid division by zero if freqs are identical
-        if (upper.freq - lower.freq < 1e-6) return getValue(lower);
+        if (upper.freq - lower.freq < EPSILON) return getValue(lower);
 
-        const t = (targetFreq - lower.freq) / (upper.freq - lower.freq);
+        // ACCURACY FIX: Interpolate frequency on a log scale
+        const logLowerFreq = Math.log10(lower.freq);
+        const logUpperFreq = Math.log10(upper.freq);
+        // Handle edge case where freqs are too close
+        const freqRange = logUpperFreq - logLowerFreq;
+        if (freqRange < EPSILON) return getValue(lower);
+
+        const t = (Math.log10(targetFreq) - logLowerFreq) / freqRange;
 
         const lowerVal = getValue(lower);
         const upperVal = getValue(upper);
 
         if (typeof lowerVal === 'number' && typeof upperVal === 'number') {
-            // Interpolate in log domain for SPL/Impedance, linear for phase
+            // Interpolate SPL/Impedance in log domain (linear in dB/log-Ohms)
             if (getValue === ((p) => p.spl) || getValue === ((p) => p.impedance)) {
+                // Check for log(0)
+                if (lowerVal <= EPSILON || upperVal <= EPSILON) {
+                    return lowerVal + (upperVal - lowerVal) * t; // Fallback to linear
+                }
                 const logLower = Math.log10(lowerVal);
                 const logUpper = Math.log10(upperVal);
                 return Math.pow(10, logLower + (logUpper - logLower) * t);
             }
-            // Linear for phase
+            // Linear for phase (Note: does not handle phase wrap, but good enough)
             return lowerVal + (upperVal - lowerVal) * t;
         }
 
         return lowerVal;
     };
 
-    // --- REPLACED FUNCTION 2: Crossover Simulation ---
-
     /**
      * Calculates the crossover's effect on the driver.
      *
-     * This function now correctly separates:
-     * 1. Electrical Domain: The crossover circuit + driver's electrical impedance (Z.zma).
-     * 2. Acoustic Domain: The SPL boost/cut from the ear simulator's acoustic impedance (Z_ear).
+     * THIS IS THE CORRECTED, TOPOLOGICALLY-AWARE VERSION.
+     * It builds the impedance and transfer function by starting
+     * at the driver and working outwards, respecting component order.
      */
-    const calculateCrossoverImpedanceAndTransfer = (freq, elements, driverImpedanceData, sourceVoltage) => {
+    const calculateCrossoverImpedanceAndTransfer = (
+        freq,
+        elements,
+        driverImpedanceData,
+        sourceVoltage,
+        frdCompensated
+    ) => {
         const omega = 2 * Math.PI * freq;
 
         // --- 1. Get Driver ELECTRICAL Impedance (from ZMA file) ---
         let Zdriver = { real: 8, imag: 0 }; // Default if no ZMA
         if (driverImpedanceData && driverImpedanceData.length > 0) {
             const impedanceMag = interpolateFrequencyData(
-                driverImpedanceData,
-                freq,
-                (point) => point.impedance || 8
+                driverImpedanceData, freq, (p) => p.impedance || 8
             );
             const phaseDeg = interpolateFrequencyData(
-                driverImpedanceData,
-                freq,
-                (point) => point.phase || 0
+                driverImpedanceData, freq, (p) => p.phase || 0
             );
 
             if (impedanceMag !== null && phaseDeg !== null) {
@@ -386,73 +354,98 @@ const IEMCrossoverSimulator = () => {
             }
         }
 
-        // THIS IS THE CRITICAL FIX:
-        // The load for the crossover network is JUST the driver's electrical impedance.
-        let Zload = Zdriver;
+        // --- 2. Calculate Circuit Impedance and Transfer Function ---
+        // We start at the driver (load) and work outwards to the source.
+        let Z_current = Zdriver;
+        // H_current is the transfer function: (Voltage AT THE DRIVER) / (Voltage at the CURRENT point in the chain)
+        let H_current = { real: 1, imag: 0 }; // At the driver, V_driver / V_driver = 1.
 
-        // --- 2. Calculate Crossover ELECTRICAL Impedance ---
-        const sortedElements = [...elements].sort((a, b) => a.order - b.order);
-        const seriesElements = sortedElements.filter(el => el.series);
-        const parallelElements = sortedElements.filter(el => !el.series);
+        // Sort elements DESCENDING by order (e.g., 2, 1, 0...)
+        // This processes components from the driver outwards.
+        const sortedElements = [...elements].sort((a, b) => b.order - a.order);
 
-        // Start with the load (driver)
-        let Z_network = Zload;
-
-        // Apply parallel elements (closest to driver)
-        // We reverse to work from load outwards, but order doesn't matter for parallel
-        for (const element of parallelElements) {
+        for (const element of sortedElements) {
             let Zelement;
-            if (element.type === 'capacitor') Zelement = { real: 0, imag: (omega > 1e-6) ? -1 / (omega * element.value * 1e-6) : -1e12 };
-            else if (element.type === 'inductor') Zelement = { real: 0, imag: omega * element.value * 1e-3 };
-            else Zelement = { real: element.value, imag: 0 };
+            const value = element.value;
 
-            Z_network = parallelImpedance(Z_network, Zelement);
+            // Get Z for the component, including parasitics
+            if (element.type === 'capacitor') {
+                const Zcap = { real: 0, imag: (omega > EPSILON) ? -1 / (omega * value * 1e-6) : -1 / (EPSILON * value * 1e-6) };
+                const Zesr = { real: element.esr || 0, imag: 0 }; // ADD ESR
+                Zelement = complexAdd(Zcap, Zesr);
+            } else if (element.type === 'inductor') {
+                const Zind = { real: 0, imag: omega * value * 1e-3 };
+                const Zdcr = { real: element.dcr || 0, imag: 0 }; // ADD DCR
+                Zelement = complexAdd(Zind, Zdcr);
+            } else { // Resistor
+                Zelement = { real: value, imag: 0 };
+            }
+
+            // Now apply this element to the chain
+            if (element.series) {
+                // Element is in SERIES with the current network.
+                // The new "input" is before this series element.
+                // This forms a voltage divider.
+                //
+                // V_out = V_in * (Z_current / (Zelement + Z_current))
+                // The voltage at the driver is H_current * V_out.
+                // So, H_new (V_driver / V_in) = H_current * (Z_current / (Zelement + Z_current))
+
+                H_current = complexMultiply(
+                    H_current,
+                    complexDivide(Z_current, complexAdd(Zelement, Z_current))
+                );
+
+                // The new total impedance is the sum.
+                Z_current = complexAdd(Z_current, Zelement);
+
+            } else {
+                // Element is in PARALLEL with the current network.
+                // The voltage across the parallel combo is the same as the
+                // voltage across Z_current, so the transfer function H_current
+                // (V_driver / V_current_input) does not change.
+
+                // The new total impedance is the parallel combination.
+                Z_current = parallelImpedance(Z_current, Zelement);
+            }
         }
 
-        let Z_series_elements = { real: 0, imag: 0 };
-        // Apply series elements
-        for (const element of seriesElements) {
-            let Zelement;
-            if (element.type === 'capacitor') Zelement = { real: 0, imag: (omega > 1e-6) ? -1 / (omega * element.value * 1e-6) : -1e12 };
-            else if (element.type === 'inductor') Zelement = { real: 0, imag: omega * element.value * 1e-3 };
-            else Zelement = { real: element.value, imag: 0 };
+        // After the loop:
+        // Z_current is the final Z_total_electrical seen by the source.
+        const Z_total_electrical = Z_current;
+        // H_current is the final H_electrical (V_driver / V_source)
+        const H_electrical = H_current;
 
-            Z_series_elements = complexAdd(Z_series_elements, Zelement);
-        }
 
-        // This is the total electrical impedance seen by the source
-        const Z_total_electrical = complexAdd(Z_series_elements, Z_network);
-
-        // --- 3. Calculate ELECTRICAL Voltage Gain ---
-        // The voltage *at the driver* (or driver + parallel elements) is V_source * (Z_network / Z_total_electrical)
-        const H_electrical = complexDivide(Z_network, Z_total_electrical);
-        const electricalGainDb = 20 * Math.log10(complexMagnitude(H_electrical));
+        // --- 3. Calculate ELECTRICAL Voltage Transfer Function ---
+        const electricalGainDb = 20 * Math.log10(complexMagnitude(H_electrical) + EPSILON);
+        const electricalPhaseDeg = complexPhase(H_electrical); // THIS IS THE CRITICAL NEW VALUE
 
         // --- 4. Calculate ACOUSTIC Gain (from Ear Simulator) ---
-        // This model assumes the .frd file is a "raw" driver response
-        // (e.g., constant volume velocity) and we are adding the coupler's
-        // acoustic impedance shape (the resonance peaks).
         const Zear_acoustic = getEarSimulatorImpedance(freq);
         const Zear_magnitude = complexMagnitude(Zear_acoustic);
 
-        // We express the gain relative to a reference (200 Hz)
-        // to turn the impedance shape into an SPL "boost" shape.
-        const earBoostDb = 20 * Math.log10(Zear_magnitude / Z_EAR_REF_MAG);
+        const earBoostDb = (earSimulator.enabled && !frdCompensated)
+            ? 20 * Math.log10((Zear_magnitude / Z_EAR_REF_MAG) + EPSILON)
+            : 0;
 
-        // --- 5. Calculate Final Gain ---
-        const voltageGainDb = 20 * Math.log10(sourceVoltage);
-
-        // This is the total gain/attenuation to be *added* to the raw SPL
-        const totalGainDb = electricalGainDb + voltageGainDb + (earSimulator.enabled ? earBoostDb : 0);
+        // --- 5. Calculate Final GAIN (to be applied to FRD) ---
+        const voltageGainDb = 20 * Math.log10(sourceVoltage + EPSILON);
+        const totalGainDb = electricalGainDb + voltageGainDb + earBoostDb;
 
         return {
             impedanceMagnitude: complexMagnitude(Z_total_electrical),
             impedancePhase: complexPhase(Z_total_electrical),
-            attenuationDb: totalGainDb
+            totalGainDb: totalGainDb, // The total dB change to apply to the SPL
+            electricalPhaseDeg: electricalPhaseDeg // The phase shift from the crossover
         };
     };
 
-    // Run simulation
+    /**
+     * Run simulation
+     * THIS VERSION CORRECTLY SEPARATES IMPEDANCE AND SPL CALCULATION,
+     * FIXING THE "0 OHM" BUG.
+     */
     const runSimulation = () => {
         const freqRange = [];
         // More points for smoother curve
@@ -467,73 +460,105 @@ const IEMCrossoverSimulator = () => {
         const results = freqRange.map(freq => {
             const point = { freq: freq };
 
-            let totalImpedance = { real: 0, imag: 0 };
+            let totalAdmittance = { real: 0, imag: 0 }; // Admittance Y = 1/Z
             let driversInParallel = 0;
+            let complexPressures = []; // For acoustic summation
 
             drivers.forEach((driver, idx) => {
-                if (!driver.frd) return;
+                // BUGFIX: Only skip if driver is truly empty.
+                if (!driver.frd && !driver.zma && crossoverElements.filter(el => el.driverIndex === idx).length === 0) {
+                    return; // Skip this driver
+                }
 
                 const driverElements = crossoverElements.filter(el => el.driverIndex === idx);
+
+                // --- 1. ELECTRICAL & IMPEDANCE CALCULATION ---
+                // This section runs regardless of whether an FRD is present.
+                // It calculates the driver's contribution to the system's total impedance.
+
+                // Call the calculation function. It will use the driver's ZMA
+                // and the crossover components.
                 const result = calculateCrossoverImpedanceAndTransfer(
                     freq,
                     driverElements,
                     driver.zma,
-                    sourceVoltage
+                    sourceVoltage,
+                    driver.frdCompensated
                 );
 
-                const baseSpl = interpolateFrequencyData(
-                    driver.frd,
-                    freq,
-                    (point) => point.spl
-                );
-
-                if (baseSpl !== null) {
-                    // 'attenuationDb' is now a total gain, so we add it
-                    let spl = baseSpl + result.attenuationDb;
-
-                    point[`driver${idx}_spl`] = spl;
+                // BUGFIX: Check for ZMA or components. A driver with only an FRD
+                // and no ZMA/crossover has no electrical impedance (it's an "ideal" driver,
+                // which isn't realistic, but we'll treat it as open-circuit).
+                // The "no components" case is handled by the new calc function.
+                if (driver.zma || driverElements.length > 0) {
                     point[`driver${idx}_impedance`] = result.impedanceMagnitude;
                     point[`driver${idx}_phase`] = result.impedancePhase;
 
-                    // For total impedance, sum admittances (1/Z)
-                    const phaseRad = (result.impedancePhase * Math.PI) / 180;
+                    // Convert Mag/Phase back to complex Z
                     const Z = {
-                        real: result.impedanceMagnitude * Math.cos(phaseRad),
-                        imag: result.impedanceMagnitude * Math.sin(phaseRad)
+                        real: result.impedanceMagnitude * Math.cos((result.impedancePhase * Math.PI) / 180),
+                        imag: result.impedanceMagnitude * Math.sin((result.impedancePhase * Math.PI) / 180)
                     };
+
+                    // Convert Z to Y (Admittance) and add to the total
                     const Y = complexDivide({ real: 1, imag: 0 }, Z);
-                    totalImpedance = complexAdd(totalImpedance, Y);
+                    totalAdmittance = complexAdd(totalAdmittance, Y);
                     driversInParallel++;
                 }
-            });
 
-            // Sum SPL values in linear (pressure) domain
-            const splValues = Object.keys(point)
-                .filter(k => k.endsWith('_spl'))
-                .map((k, idx) => {
-                    const spl = point[k];
-                    // Polarity is a 180-degree phase shift, or multiplying by -1
-                    const polarity = drivers[idx]?.polarity ? -1 : 1;
-                    // Convert dB to linear pressure, apply polarity
-                    return polarity * Math.pow(10, spl / 20);
-                });
 
-            if (splValues.length > 0) {
-                const sum = splValues.reduce((a, b) => a + b, 0);
-                const absSum = Math.abs(sum);
-                if (absSum > 1e-10) {
-                    const totalSpl = 20 * Math.log10(absSum);
-                    point.total_spl = totalSpl;
-                } else {
-                    point.total_spl = -200; // Very quiet
+                // --- 2. ACOUSTIC & SPL CALCULATION ---
+                // This section only runs if an FRD file is present.
+                if (driver.frd) {
+                    // Get base SPL and ACOUSTIC phase from FRD
+                    const baseSpl = interpolateFrequencyData(driver.frd, freq, (p) => p.spl);
+                    const baseAcousticPhase = interpolateFrequencyData(driver.frd, freq, (p) => p.phase || 0);
+
+                    if (baseSpl !== null) {
+                        // --- Total SPL (Magnitude) ---
+                        const finalDriverSpl = baseSpl + result.totalGainDb;
+                        point[`driver${idx}_spl`] = finalDriverSpl;
+
+                        // --- Total Phase (Angle) ---
+                        const polarityPhase = driver.polarity ? 180 : 0;
+                        const finalDriverPhaseDeg = baseAcousticPhase + result.electricalPhaseDeg + polarityPhase;
+
+                        // --- Convert to Complex Pressure ---
+                        const pressureMag = Math.pow(10, finalDriverSpl / 20);
+                        const phaseRad = (finalDriverPhaseDeg * Math.PI) / 180;
+
+                        const complexPressure = {
+                            real: pressureMag * Math.cos(phaseRad),
+                            imag: pressureMag * Math.sin(phaseRad)
+                        };
+                        complexPressures.push(complexPressure);
+                    }
                 }
+            }); // --- End of driver loop ---
+
+            // --- 5. Sum Acoustic Pressures ---
+            if (complexPressures.length > 0) {
+                const totalComplexPressure = complexPressures.reduce(
+                    (a, b) => complexAdd(a, b), { real: 0, imag: 0 }
+                );
+                const totalPressureMag = complexMagnitude(totalComplexPressure);
+
+                point.total_spl = (totalPressureMag > EPSILON)
+                    ? 20 * Math.log10(totalPressureMag)
+                    : -200;
             }
 
-            // Finalize total impedance
+            // --- 6. Finalize Total Impedance ---
+            // BUGFIX: This block now runs correctly even if only a ZMA was provided.
             if (driversInParallel > 0) {
-                const Z_total = complexDivide({ real: 1, imag: 0 }, totalImpedance);
+                const Z_total = complexDivide({ real: 1, imag: 0 }, totalAdmittance);
                 point.total_impedance = complexMagnitude(Z_total);
                 point.total_phase = complexPhase(Z_total);
+            } else if (drivers.length > 0 && driversInParallel === 0) {
+                // Case: Drivers were added but had no ZMA or crossover (e.g., FRD only).
+                // System impedance is effectively infinite (open circuit).
+                point.total_impedance = 1e9; // Set to a very high impedance
+                point.total_phase = 0;
             }
 
             return point;
@@ -545,13 +570,10 @@ const IEMCrossoverSimulator = () => {
     // Export results
     const exportResults = () => {
         if (!simulationData) return;
-
         let csv = 'Frequency(Hz),Total SPL(dB),Total Impedance(Ohm),Total Phase(deg)\n';
-
         simulationData.forEach(point => {
             csv += `${point.freq.toFixed(2)},${point.total_spl?.toFixed(2) || ''},${point.total_impedance?.toFixed(2) || ''},${point.total_phase?.toFixed(2) || ''}\n`;
         });
-
         const blob = new Blob([csv], { type: 'text/csv' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -575,29 +597,16 @@ const IEMCrossoverSimulator = () => {
 
     const getImpedanceRange = () => {
         if (!simulationData || activeTab !== 'impedance') return ['auto', 'auto'];
-
-        const impedanceValues = [];
-        simulationData.forEach(point => {
-            if (point.total_impedance) impedanceValues.push(point.total_impedance);
-            // drivers.forEach((_, idx) => {
-            //   if (point[`driver${idx}_impedance`]) {
-            //     impedanceValues.push(point[`driver${idx}_impedance`]);
-            //   }
-            // });
-        });
-
+        const impedanceValues = simulationData.map(p => p.total_impedance).filter(Boolean);
         if (impedanceValues.length === 0) return [0, 50];
-
         const min = Math.min(...impedanceValues);
         const max = Math.max(...impedanceValues);
         const padding = Math.max(5, (max - min) * 0.1);
-
         return [Math.max(0, Math.floor(min - padding)), Math.ceil(max + padding)];
     };
 
     const getPhaseRange = () => {
         if (activeTab !== 'phase') return ['auto', 'auto'];
-        // Clamp phase to a standard -180 to 180 view
         return [-180, 180];
     };
 
@@ -607,6 +616,8 @@ const IEMCrossoverSimulator = () => {
         return ['auto', 'auto'];
     };
 
+
+    // --- UI (JSX) SECTION ---
     return (
         <div className="min-h-screen w-full bg-gradient-to-br from-gray-50 to-gray-100 font-sans">
             <div className="max-w-[1920px] mx-auto p-4 lg:p-8">
@@ -635,22 +646,21 @@ const IEMCrossoverSimulator = () => {
                             <h3 className="font-semibold mb-3 text-lg">Advanced Features</h3>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div>
-                                    <h4 className="font-medium mb-2">IEC 60318-4 Ear Simulator</h4>
+                                    <h4 className="font-medium mb-2">Acoustic Simulation</h4>
                                     <ul className="list-disc list-inside space-y-1 text-gray-700">
-                                        <li>Implements the standard RLC equivalent circuit.</li>
-                                        <li>Models eardrum/coupler acoustic impedance.</li>
-                                        <li>Generates the characteristic 2.7 kHz resonance.</li>
-                                        <li>Sliders perturb the standard model parameters.</li>
+                                        <li>Full complex pressure summation (phase accurate).</li>
+                                        <li>IEC 60318-4 RLC equivalent circuit.</li>
+                                        <li>Toggleable coupler compensation per driver.</li>
                                         <li>Adjustable seal leakage (bass roll-off).</li>
                                     </ul>
                                 </div>
                                 <div>
-                                    <h4 className="font-medium mb-2">Crossover Design</h4>
+                                    <h4 className="font-medium mb-2">Electrical Simulation</h4>
                                     <ul className="list-disc list-inside space-y-1 text-gray-700">
-                                        <li>Full RLC support with ordering.</li>
-                                        <li>Polarity inversion per driver.</li>
+                                        <li>Models RLC networks with DCR and ESR.</li>
+                                        <li>Calculates crossover electrical phase shift.</li>
                                         <li>Source voltage presets (simulates different amps).</li>
-                                        <li>Correctly models electrical/acoustic domains.</li>
+                                        <li>Polarity inversion per driver.</li>
                                     </ul>
                                 </div>
                             </div>
@@ -670,8 +680,8 @@ const IEMCrossoverSimulator = () => {
                                 key={key}
                                 onClick={() => setSourcePreset(key)}
                                 className={`p-3 rounded-lg border-2 transition-all ${sourcePreset === key
-                                        ? 'border-blue-500 bg-blue-50 text-blue-700 font-semibold shadow-inner'
-                                        : 'border-gray-200 hover:border-gray-300'
+                                    ? 'border-blue-500 bg-blue-50 text-blue-700 font-semibold shadow-inner'
+                                    : 'border-gray-200 hover:border-gray-300'
                                     }`}
                             >
                                 <div className="text-sm font-medium">{preset.name}</div>
@@ -795,7 +805,7 @@ const IEMCrossoverSimulator = () => {
                                             <input
                                                 type="text"
                                                 value={driver.name}
-                                                onChange={(e) => updateDriverName(idx, e.target.value)}
+                                                onChange={(e) => updateDriverField(idx, 'name', e.target.value)}
                                                 className="font-semibold text-lg bg-white border border-gray-300 rounded px-3 py-1 focus:outline-none focus:ring-2 focus:ring-blue-400"
                                                 aria-label={`Driver ${idx + 1} name`}
                                             />
@@ -803,8 +813,8 @@ const IEMCrossoverSimulator = () => {
                                                 <button
                                                     onClick={() => togglePolarity(idx)}
                                                     className={`px-3 py-1 rounded text-sm font-medium transition-colors ${driver.polarity
-                                                            ? 'bg-red-100 text-red-700 border border-red-300'
-                                                            : 'bg-gray-200 text-gray-700 border border-gray-300'
+                                                        ? 'bg-red-100 text-red-700 border border-red-300'
+                                                        : 'bg-gray-200 text-gray-700 border border-gray-300'
                                                         }`}
                                                     title="Toggle polarity inversion"
                                                 >
@@ -823,7 +833,7 @@ const IEMCrossoverSimulator = () => {
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
                                             <div>
                                                 <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor={`frd-file-${idx}`}>
-                                                    FRD File (Frequency Response)
+                                                    FRD File (Freq, SPL, Phase)
                                                 </label>
                                                 <input
                                                     id={`frd-file-${idx}`}
@@ -841,7 +851,7 @@ const IEMCrossoverSimulator = () => {
 
                                             <div>
                                                 <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor={`zma-file-${idx}`}>
-                                                    ZMA File (Impedance)
+                                                    ZMA File (Freq, Z, Phase)
                                                 </label>
                                                 <input
                                                     id={`zma-file-${idx}`}
@@ -857,6 +867,21 @@ const IEMCrossoverSimulator = () => {
                                                 )}
                                             </div>
                                         </div>
+
+                                        {/* NEW: Coupler Compensation Checkbox */}
+                                        <div className="flex items-center gap-2 mb-3">
+                                            <input
+                                                id={`compensated-check-${idx}`}
+                                                type="checkbox"
+                                                checked={driver.frdCompensated}
+                                                onChange={(e) => updateDriverField(idx, 'frdCompensated', e.target.checked)}
+                                                className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500"
+                                            />
+                                            <label htmlFor={`compensated-check-${idx}`} className="block text-sm font-medium text-gray-700">
+                                                FRD includes 711 Coupler
+                                            </label>
+                                        </div>
+
 
                                         <div className="border-t-2 border-gray-300 pt-3 mt-3">
                                             <div className="flex justify-between items-center mb-3">
@@ -874,66 +899,96 @@ const IEMCrossoverSimulator = () => {
                                                     .filter(el => el.driverIndex === idx)
                                                     .sort((a, b) => a.order - b.order)
                                                     .map((element, elemIdx, arr) => (
-                                                        <div key={element.id} className="flex gap-2 items-center bg-white p-3 rounded-lg border border-gray-200">
-                                                            <div className="flex flex-col gap-1">
-                                                                <button
-                                                                    onClick={() => moveElement(element.id, 'up')}
-                                                                    disabled={elemIdx === 0}
-                                                                    className="p-1 hover:bg-gray-100 rounded disabled:opacity-30 disabled:cursor-not-allowed"
-                                                                    aria-label="Move element up"
+                                                        <div key={element.id} className="p-3 rounded-lg border border-gray-200 bg-white">
+                                                            <div className="flex gap-2 items-center">
+                                                                <div className="flex flex-col gap-1">
+                                                                    <button
+                                                                        onClick={() => moveElement(element.id, 'up')}
+                                                                        disabled={elemIdx === 0}
+                                                                        className="p-1 hover:bg-gray-100 rounded disabled:opacity-30 disabled:cursor-not-allowed"
+                                                                        aria-label="Move element up"
+                                                                    >
+                                                                        <ChevronUp size={16} />
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => moveElement(element.id, 'down')}
+                                                                        disabled={elemIdx === arr.length - 1}
+                                                                        className="p-1 hover:bg-gray-100 rounded disabled:opacity-30 disabled:cursor-not-allowed"
+                                                                        aria-label="Move element down"
+                                                                    >
+                                                                        <ChevronDown size={16} />
+                                                                    </button>
+                                                                </div>
+
+                                                                <select
+                                                                    value={element.type}
+                                                                    onChange={(e) => updateCrossoverElement(element.id, 'type', e.target.value)}
+                                                                    className="text-sm border border-gray-300 rounded-lg px-2 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                    aria-label="Element type"
                                                                 >
-                                                                    <ChevronUp size={16} />
-                                                                </button>
-                                                                <button
-                                                                    onClick={() => moveElement(element.id, 'down')}
-                                                                    disabled={elemIdx === arr.length - 1}
-                                                                    className="p-1 hover:bg-gray-100 rounded disabled:opacity-30 disabled:cursor-not-allowed"
-                                                                    aria-label="Move element down"
+                                                                    <option value="capacitor">Capacitor</option>
+                                                                    <option value="inductor">Inductor</option>
+                                                                    <option value="resistor">Resistor</option>
+                                                                </select>
+
+                                                                <input
+                                                                    type="number"
+                                                                    step="0.1"
+                                                                    value={element.value}
+                                                                    onChange={(e) => updateCrossoverElement(element.id, 'value', parseFloat(e.target.value) || 0)}
+                                                                    className="text-sm border border-gray-300 rounded-lg px-2 py-2 w-24 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                    aria-label="Element value"
+                                                                />
+                                                                <span className="text-xs text-gray-600 font-medium min-w-[35px]">
+                                                                    {getUnitLabel(element.type)}
+                                                                </span>
+
+                                                                <select
+                                                                    value={element.series}
+                                                                    onChange={(e) => updateCrossoverElement(element.id, 'series', e.target.value === 'true')}
+                                                                    className="text-sm border border-gray-300 rounded-lg px-2 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                    aria-label="Element position"
                                                                 >
-                                                                    <ChevronDown size={16} />
+                                                                    <option value="true">Series</option>
+                                                                    <option value="false">Parallel</option>
+                                                                </select>
+
+                                                                <button
+                                                                    onClick={() => removeCrossoverElement(element.id)}
+                                                                    className="text-red-600 hover:text-red-800 ml-auto p-1"
+                                                                    aria-label="Remove element"
+                                                                >
+                                                                    <Trash2 size={16} />
                                                                 </button>
                                                             </div>
 
-                                                            <select
-                                                                value={element.type}
-                                                                onChange={(e) => updateCrossoverElement(element.id, 'type', e.target.value)}
-                                                                className="text-sm border border-gray-300 rounded-lg px-2 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                                aria-label="Element type"
-                                                            >
-                                                                <option value="capacitor">Capacitor</option>
-                                                                <option value="inductor">Inductor</option>
-                                                                <option value="resistor">Resistor</option>
-                                                            </select>
-
-                                                            <input
-                                                                type="number"
-                                                                step="0.1"
-                                                                value={element.value}
-                                                                onChange={(e) => updateCrossoverElement(element.id, 'value', parseFloat(e.target.value) || 0)}
-                                                                className="text-sm border border-gray-300 rounded-lg px-2 py-2 w-24 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                                aria-label="Element value"
-                                                            />
-                                                            <span className="text-xs text-gray-600 font-medium min-w-[35px]">
-                                                                {getUnitLabel(element.type)}
-                                                            </span>
-
-                                                            <select
-                                                                value={element.series}
-                                                                onChange={(e) => updateCrossoverElement(element.id, 'series', e.target.value === 'true')}
-                                                                className="text-sm border border-gray-300 rounded-lg px-2 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                                aria-label="Element position"
-                                                            >
-                                                                <option value="true">Series</option>
-                                                                <option value="false">Parallel</option>
-                                                            </select>
-
-                                                            <button
-                                                                onClick={() => removeCrossoverElement(element.id)}
-                                                                className="text-red-600 hover:text-red-800 ml-auto p-1"
-                                                                aria-label="Remove element"
-                                                            >
-                                                                <Trash2 size={16} />
-                                                            </button>
+                                                            {/* NEW: DCR and ESR Inputs */}
+                                                            <div className="mt-2 flex gap-4">
+                                                                {element.type === 'inductor' && (
+                                                                    <div className="flex-1">
+                                                                        <label className="text-xs text-gray-500">DCR (Ohm)</label>
+                                                                        <input
+                                                                            type="number"
+                                                                            step="0.01"
+                                                                            value={element.dcr}
+                                                                            onChange={(e) => updateCrossoverElement(element.id, 'dcr', parseFloat(e.target.value) || 0)}
+                                                                            className="text-sm border border-gray-300 rounded-lg px-2 py-1 w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                        />
+                                                                    </div>
+                                                                )}
+                                                                {element.type === 'capacitor' && (
+                                                                    <div className="flex-1">
+                                                                        <label className="text-xs text-gray-500">ESR (Ohm)</label>
+                                                                        <input
+                                                                            type="number"
+                                                                            step="0.01"
+                                                                            value={element.esr}
+                                                                            onChange={(e) => updateCrossoverElement(element.id, 'esr', parseFloat(e.target.value) || 0)}
+                                                                            className="text-sm border border-gray-300 rounded-lg px-2 py-1 w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                        />
+                                                                    </div>
+                                                                )}
+                                                            </div>
                                                         </div>
                                                     ))}
                                             </div>
@@ -950,7 +1005,7 @@ const IEMCrossoverSimulator = () => {
                             <div className="flex gap-3 mb-6">
                                 <button
                                     onClick={runSimulation}
-                                    disabled={drivers.length === 0 || !drivers.some(d => d.frd)}
+                                    disabled={drivers.length === 0}
                                     className="flex items-center justify-center gap-2 px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex-1 transition-colors font-semibold"
                                 >
                                     <Play size={20} /> Run Simulation
@@ -972,8 +1027,8 @@ const IEMCrossoverSimulator = () => {
                                         <button
                                             onClick={() => setActiveTab('magnitude')}
                                             className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'magnitude'
-                                                    ? 'bg-blue-600 text-white shadow-md'
-                                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                ? 'bg-blue-600 text-white shadow-md'
+                                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                                                 }`}
                                         >
                                             Magnitude Response
@@ -981,8 +1036,8 @@ const IEMCrossoverSimulator = () => {
                                         <button
                                             onClick={() => setActiveTab('individual')}
                                             className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'individual'
-                                                    ? 'bg-blue-600 text-white shadow-md'
-                                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                ? 'bg-blue-600 text-white shadow-md'
+                                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                                                 }`}
                                         >
                                             Individual Drivers
@@ -990,8 +1045,8 @@ const IEMCrossoverSimulator = () => {
                                         <button
                                             onClick={() => setActiveTab('impedance')}
                                             className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'impedance'
-                                                    ? 'bg-blue-600 text-white shadow-md'
-                                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                ? 'bg-blue-600 text-white shadow-md'
+                                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                                                 }`}
                                         >
                                             Impedance
@@ -999,8 +1054,8 @@ const IEMCrossoverSimulator = () => {
                                         <button
                                             onClick={() => setActiveTab('phase')}
                                             className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'phase'
-                                                    ? 'bg-blue-600 text-white shadow-md'
-                                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                ? 'bg-blue-600 text-white shadow-md'
+                                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                                                 }`}
                                         >
                                             Phase Response
@@ -1013,6 +1068,7 @@ const IEMCrossoverSimulator = () => {
                                                 <CartesianGrid strokeDasharray="3 3" stroke="#ccc" />
                                                 <XAxis
                                                     dataKey="freq"
+                                                    type="number"
                                                     scale="log"
                                                     domain={[20, 20000]}
                                                     ticks={[20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]}
@@ -1103,21 +1159,19 @@ const IEMCrossoverSimulator = () => {
                     <h3 className="font-semibold text-lg mb-4">Professional Features Guide</h3>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm">
                         <div>
-                            <h4 className="font-semibold mb-2 text-gray-800">IEC 60318-4 Ear Simulator</h4>
+                            <h4 className="font-semibold mb-2 text-gray-800">Acoustic Simulation</h4>
                             <ul className="list-disc list-inside space-y-1 text-gray-700">
-                                <li>Standard RLC equivalent circuit</li>
-                                <li>Eardrum/coupler acoustic impedance</li>
-                                <li>Natural resonance at 2.7 kHz</li>
+                                <li>Full complex pressure summation</li>
+                                <li>IEC 60318-4 RLC equivalent circuit</li>
+                                <li>Toggleable coupler compensation</li>
                                 <li>Adjustable seal leakage (bass)</li>
-                                <li>Correctly adds acoustic gain</li>
                             </ul>
                         </div>
                         <div>
                             <h4 className="font-semibold mb-2 text-gray-800">Crossover Design</h4>
                             <ul className="list-disc list-inside space-y-1 text-gray-700">
-                                <li>Capacitors (uF) for high-pass</li>
-                                <li>Inductors (mH) for low-pass</li>
-                                <li>Resistors (Ohm) for attenuation</li>
+                                <li>Parasitic modeling (DCR & ESR)</li>
+                                <li>Capacitors (uF), Inductors (mH), Resistors (Ohm)</li>
                                 <li>Reorderable element chain</li>
                                 <li>Series and parallel topology</li>
                             </ul>
@@ -1128,7 +1182,6 @@ const IEMCrossoverSimulator = () => {
                                 <li>Polarity inversion per driver</li>
                                 <li>Source voltage presets</li>
                                 <li>Total system impedance & phase</li>
-                                <li>Complex pressure summation</li>
                                 <li>CSV export for data analysis</li>
                             </ul>
                         </div>
@@ -1140,4 +1193,3 @@ const IEMCrossoverSimulator = () => {
 };
 
 export default IEMCrossoverSimulator;
-
